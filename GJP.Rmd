@@ -1,0 +1,236 @@
+---
+title: "GJP"
+author: "Hang Su"
+date: "2021/10/14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(LANGUAGE = "en")
+```
+
+```{r}
+rm(list = ls())
+```
+
+# data preparation
+
+The underlying idea of getting the Brier scores is that 
+
+1. Build a array with three dimensions. Each dimension represent user, question, and day respectively. so a data such as [1,2,3] represent the Brier scores of question 2 of user 1 on day 3's response. The array is called `scores`
+2. Because the `yr1.use` record all change users made. Using each of these pieces of `yr1.use`, we can update all the scores from the time a user changes the answer to the time the question close. Because we sorted the `yr1.use`, decisions already made will not be changed by new data. For example, line 1 of `yr1.use` may said, user 1 change the question 2's answer with a:50%, b:50%, and the right answer is a. Then we get Brier ((50% - 1)^2 +  (50% - 1)^2) = 0.5. And the line 1 also said the question started on day 1 and ended on day 50. So we updata `scores[1,2,1:50] <- 0.5`. Later, in day 25, the user change the answer to a answer with Brier scores with 0.25, then we update the array as `scores[1,2,25:50] <- 0.25`.
+3. now, in the array, all answers not answered by the user are represented as NA. According the question list, we can get each question's begin and end date. all NA between the two date is replaced by the average daily result.
+4. By slicing the array we can calculate the average score for each person. `mean(scores[1,,],na.rm = T)`
+
+## data screening
+
+```{r}
+# read the question files as a df
+ifps <- read.table(file = "./ifps.csv", header = T, sep = ",", 
+                   na.strings = "NA", comment.char = "", quote = "\"")
+# data clean
+ifps <- ifps[-which(is.na(ifps$date_closed)),]
+ifps$ifp_id <- as.integer(as.vector(unlist(lapply(strsplit(x = ifps$ifp_id, split = "-"), function(x) x[1]))))
+ifps$date_start <- as.Date(x = ifps$date_start, format = "%m/%d/%y")
+ifps$date_closed <- as.Date(x = ifps$date_closed, format = "%m/%d/%y")
+ifps$date_to_close <- as.Date(x = ifps$date_to_close, format = "%m/%d/%y")
+ifps$date_suspend <- as.vector(unlist(lapply(strsplit(x = ifps$date_suspend, split = " "), function(x) x[1])))
+ifps$date_suspend <- as.Date(x = ifps$date_suspend, format = "%m/%d/%y")
+
+# read the result of year 1 files as a df
+yr1.raw <- read.table(file = "./survey_fcasts.yr1.csv", header = T, sep = ",", 
+                   na.strings = "NA", comment.char = "", quote = "\"") 
+# data clean
+yr1.raw <- yr1.raw[-which(yr1.raw$user_id == "NULL"),]
+yr1.raw$ifp_id <- as.integer(as.vector(unlist(lapply(strsplit(x = yr1.raw$ifp_id, split = "-"), function(x) x[1]))))
+yr1.raw$fcast_date <-as.Date(x = yr1.raw$fcast_date, format = "%Y-%m-%d")
+yr1.raw$user_id <- as.integer(yr1.raw$user_id)
+yr1.raw <- merge(x = yr1.raw, y = ifps[,c("ifp_id", "outcome", "date_start", "date_closed")], by = "ifp_id")
+yr1.raw[,"brier"] <-( yr1.raw[,"value"] - (yr1.raw[,"answer_option"] == yr1.raw[,"outcome"]))^2
+
+# read the result of year 2 files as a df
+yr2.raw <- read.table(file = "./survey_fcasts.yr2.csv", header = T, sep = ",", 
+                   na.strings = "NA", comment.char = "", quote = "\"")
+yr2.raw$ifp_id <- as.integer(as.vector(unlist(lapply(strsplit(x = yr2.raw$ifp_id, split = "-"), function(x) x[1]))))
+yr2.raw$fcast_date <-as.Date(x = yr2.raw$fcast_date, format = "%Y-%m-%d")
+yr2.raw <- merge(x = yr2.raw, y = ifps[,c("ifp_id", "outcome", "date_start", "date_closed")], by = "ifp_id")
+yr2.raw[,"brier"] <-( yr2.raw[,"value"] - (yr2.raw[,"answer_option"] == yr2.raw[,"outcome"]))^2
+
+# read the used ifp's index
+used.items <- read.table(file = "./used items.csv", header = T, sep = ",", 
+                   na.strings = "NA", comment.char = "", quote = "\"")
+used.items <- as.vector(used.items[,1])
+used.items <- used.items[order(used.items)]
+```
+
+## caculate the brier
+
+```{r}
+
+# Until the next double blank line, prepare for the while cycle
+
+yr1.items <- used.items[1:85]
+
+# Filter the items we need
+yr1.use.items.indexs <- NULL
+for (use.item in yr1.items) {
+  yr1.use.items.indexs <- c(yr1.use.items.indexs, which(yr1.raw$ifp_id == use.item))
+}
+yr1.use <- yr1.raw[yr1.use.items.indexs,]
+remove(use.item, yr1.use.items.indexs)
+
+# Filter the items we used
+ifps.yr1.indexs <- NULL
+for (use.item in yr1.items) {
+  ifps.yr1.indexs <- c(ifps.yr1.indexs, which(ifps$ifp_id == use.item))
+}
+yr1.ifps <- ifps[ifps.yr1.indexs,]
+remove(use.item, ifps.yr1.indexs)
+yr1.use <- yr1.use[order(yr1.use$forecast_id, yr1.use$answer_option),]
+
+yr1.users <- unique(yr1.use$user_id)
+yr1.users <- yr1.users[order(yr1.users)]
+# reassign a id to each user, so that later we can use the id as index within our array
+for(user.index in 1:length(yr1.users)){
+  yr1.use[which(yr1.use$user_id == yr1.users[user.index]), "new_user_id"] <- user.index 
+}; remove(user.index)
+for(ifp.index in 1:length(yr1.items)){
+  yr1.use[which(yr1.use$ifp_id == yr1.items[ifp.index]), "new_ifp_id"] <- ifp.index 
+}; remove(ifp.index)
+
+yr1.duration <- as.integer(max(yr1.ifps$date_closed) - min(yr1.ifps$date_start))
+yr1.date.start <- min(yr1.ifps$date_start)
+yr1.use$new_fcast_date <- as.integer(yr1.use$fcast_date - yr1.date.start)
+yr1.use[which(yr1.use$new_fcast_date < 0),"new_fcast_date"] <- 0 ## few line's fcast_date is before the open day.
+yr1.use[which(yr1.use$new_fcast_date > yr1.duration),"new_fcast_date"] <- yr1.duration ## no line in the yr1.use is influence by this code, but include it in case that happen
+
+yr1.ifps$new_date_closed <- as.integer(yr1.ifps$date_closed - yr1.date.start)
+yr1.ifps$new_date_start <- as.integer(yr1.ifps$date_start - yr1.date.start) + 1
+
+
+
+# In the while, all data in the yr1.use are loaded into the array.
+scores <- array(dim = c(length(yr1.users), length(yr1.items), yr1.duration)) ## x = persons, y = items. z = days.
+i <- 1 ## the index of line that we are now processing
+while (i <= dim(yr1.use)[1]) {
+  # one loop for records with the same ifp_id, i.e. The while judgment is executed once a day
+  n.opts <- yr1.ifps[yr1.use[i,"new_ifp_id"],"n_opts"]
+  the.user <- yr1.use[i,"new_user_id"]
+  the.item <- yr1.use[i,"new_ifp_id"]
+  the.begin.date.of.question <- yr1.ifps[yr1.use[i,"new_ifp_id"],"new_date_start"]
+  if (yr1.use[i,"new_fcast_date"] < the.begin.date.of.question ) {
+    the.fcast.date <- the.begin.date.of.question
+  }else {
+    the.fcast.date <- yr1.use[i,"new_fcast_date"]
+  }
+  the.end.date.of.question <- yr1.ifps[yr1.use[i,"new_ifp_id"],"new_date_closed"]
+  if (the.end.date.of.question < the.fcast.date) {
+    i <- i + n.opts
+    next
+  }
+  scores[the.user, the.item, the.fcast.date:the.end.date.of.question] <- sum(yr1.use[i:(i + n.opts - 1),"brier"])
+  if (!all(yr1.use[i:(i + n.opts - 1),"ifp_id"] == yr1.use[i,"ifp_id"])) {
+    stop() ## double check the data integrity
+  }
+  
+  i <- i + n.opts
+}
+remove(n.opts, the.user, the.item, the.end.date.of.question, the.begin.date.of.question)
+```
+
+
+```{r}
+# Fill the question that participants did not give a answer
+
+i <- 1 ## the index of ifps that we are now processing
+while (i <= dim(yr1.ifps)[1]) {
+  the.begin <- yr1.ifps[i,"new_date_start"]
+  the.end <- yr1.ifps[i,"new_date_closed"]
+  day <- the.begin
+  
+  while (day <= the.end) {
+    if (all(is.na(scores[,i,day]))) {
+      # No one in this branch had made any predictions about this problem before today
+      # Everyone was assigned an average of all previous data
+      if (all(is.na(scores[,,1:day]))) {
+        # if all data till today is NA, then assign 1 to every today's NA
+        scores[,i,day] <- 1
+      }else {
+        scores[,i,day] <- mean(scores[,,1:day])
+      }
+      print(i); print(day) # report the condition
+    }else {
+      # the most common condition, i.e. someone already answer the question
+      scores[which(is.na(scores[,i,day])),i,day] <- mean(scores[,i,day], na.rm = TRUE)
+    }
+    
+    day <- day + 1
+  }
+  
+  i <- i + 1
+}
+remove(the.begin, the.end, day)
+```
+
+```{r}
+
+# Form a df with training condition and the score
+
+i <- 1 # the index of user that we are now processing
+yr1.brier <- NULL
+yr1.brier <- as.double(yr1.brier)
+while (i <= length(yr1.users)){
+  yr1.brier <- c(yr1.brier, mean(scores[i,,], na.rm = TRUE))
+  i <- i + 1
+}
+remove(i)
+
+yr1.df <- data.frame(yr1.users, yr1.brier)
+names(yr1.df) <- c("user_id", "user_brier")
+training.df <- yr1.use[,c("user_id", "training")]
+training.df <- training.df[!duplicated(training.df$user_id),]
+yr1.df <- merge(x = yr1.df, y = training.df, by = "user_id")
+remove(training.df)
+```
+
+# statistical tests of the data
+
+```{r}
+mean(yr1.df[which(yr1.df$training == "a"),]$user_brier)
+mean(yr1.df[which(yr1.df$training == "b"),]$user_brier) # prob train
+mean(yr1.df[which(yr1.df$training == "c"),]$user_brier) # scenario
+```
+
+
+
+```{r}
+yr1.df[which(yr1.df$training == "b"), "dummy_b"] <- 1
+yr1.df[-which(yr1.df$training == "b"), "dummy_b"] <- 0
+yr1.df[which(yr1.df$training == "c"), "dummy_c"] <- 1
+yr1.df[-which(yr1.df$training == "c"), "dummy_c"] <- 0
+
+yr1.df[which(yr1.df$training == "a"), "anova_group"] <- 0
+yr1.df[which(yr1.df$training == "b"), "anova_group"] <- 1
+yr1.df[which(yr1.df$training == "c"), "anova_group"] <- 2
+yr1.df$anova_group <- as.factor(yr1.df$anova_group)
+summary(aov(user_brier ~ anova_group,data = yr1.df))
+
+fit <- lm(user_brier ~ dummy_b * dummy_c, data = yr1.df)
+anova(fit)
+```
+
+```{r}
+t.test(yr1.df[which(yr1.df$training == "c"),"user_brier"], yr1.df[which(yr1.df$training == "a"),"user_brier"])
+t.test(yr1.df[which(yr1.df$training == "c"),"user_brier"], yr1.df[which(yr1.df$training == "b"),"user_brier"])
+```
+
+
+# test code and some deleted code
+```{r}
+for (i in 1:85) {
+  if (sum(is.na(scores[1,i,])) != sum(is.na(scores[5,i,]))) {
+    print(i)
+  }
+}
+```
